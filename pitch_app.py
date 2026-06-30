@@ -1,0 +1,584 @@
+#!/usr/bin/env python3
+"""
+pitch_app.py
+
+Interface graphique (navigateur, via Streamlit) pour pitcher des musiques en
+masse avec FFmpeg — vitesse + hauteur, comme "Change Speed" dans Audacity.
+
+On peut :
+  - pitcher tout un dossier
+  - OU pitcher seulement des fichiers choisis
+  - choisir un dossier de sortie
+  - convertir vers un autre format / une autre qualité (MP3 320, WAV, FLAC...)
+  - créer / sauvegarder / charger des PROFILS de configuration (base JSON)
+  - changer la langue de l'interface (en.json par défaut, fr.json)
+
+Lancement :
+    pip install streamlit
+    streamlit run pitch_app.py
+
+Nécessite ffmpeg ET ffprobe installés et accessibles dans le PATH.
+  -> Windows : winget install ffmpeg   (ou https://ffmpeg.org/download.html)
+  -> Mac     : brew install ffmpeg
+  -> Linux   : sudo apt install ffmpeg
+"""
+
+import json
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
+
+import streamlit as st
+
+HERE = Path(__file__).parent
+
+# Extensions audio prises en charge en entrée
+AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".aiff", ".aif", ".m4a", ".ogg", ".wma", ".opus"}
+
+# Fichiers de persistance
+PROFILES_PATH = HERE / "profiles.json"
+DRAFT_PATH = HERE / ".pitch_draft.json"
+
+# Langues disponibles (code -> fichier <code>.json). "en" = défaut/fallback.
+LANGUAGES = ["en", "fr"]
+DEFAULT_LANG = "en"
+
+# ---------------------------------------------------------------------------
+# Presets de format / qualité de sortie, identifiés par un ID STABLE
+# (indépendant de la langue). id -> (extension de sortie, args codec FFmpeg).
+# Le libellé affiché vient des fichiers de traduction ("presets").
+# "keep" = garder le format d'origine (ext = None).
+# ---------------------------------------------------------------------------
+OUTPUT_PRESETS = {
+    "keep":     (None, None),
+    "mp3_320":  (".mp3", ["-codec:a", "libmp3lame", "-b:a", "320k"]),
+    "mp3_256":  (".mp3", ["-codec:a", "libmp3lame", "-b:a", "256k"]),
+    "mp3_192":  (".mp3", ["-codec:a", "libmp3lame", "-b:a", "192k"]),
+    "mp3_128":  (".mp3", ["-codec:a", "libmp3lame", "-b:a", "128k"]),
+    "mp3_v0":   (".mp3", ["-codec:a", "libmp3lame", "-q:a", "0"]),
+    "mp3_v2":   (".mp3", ["-codec:a", "libmp3lame", "-q:a", "2"]),
+    "flac":     (".flac", ["-codec:a", "flac", "-compression_level", "8"]),
+    "wav16":    (".wav", ["-codec:a", "pcm_s16le"]),
+    "wav24":    (".wav", ["-codec:a", "pcm_s24le"]),
+    "aac_256":  (".m4a", ["-codec:a", "aac", "-b:a", "256k"]),
+    "aac_192":  (".m4a", ["-codec:a", "aac", "-b:a", "192k"]),
+    "ogg_q5":   (".ogg", ["-codec:a", "libvorbis", "-q:a", "5"]),
+    "opus_128": (".opus", ["-codec:a", "libopus", "-b:a", "128k"]),
+}
+
+# Réglages "qualité max" utilisés quand on garde le format d'origine
+KEEP_FORMAT_CODECS = {
+    ".mp3":  ["-codec:a", "libmp3lame", "-q:a", "0"],
+    ".flac": ["-codec:a", "flac", "-compression_level", "8"],
+    ".wav":  ["-codec:a", "pcm_s16le"],
+    ".aiff": ["-codec:a", "pcm_s16be"],
+    ".aif":  ["-codec:a", "pcm_s16be"],
+    ".m4a":  ["-codec:a", "aac", "-b:a", "256k"],
+    ".ogg":  ["-codec:a", "libvorbis", "-q:a", "6"],
+    ".opus": ["-codec:a", "libopus", "-b:a", "160k"],
+    ".wma":  ["-codec:a", "wmav2", "-b:a", "192k"],
+}
+
+# Config sauvegardée dans un profil (valeurs internes, indépendantes de la langue).
+# Les fichiers individuels ne sont volontairement PAS conservés.
+DEFAULTS = {
+    "mode": "folder",            # "folder" | "files"
+    "input_dir": "",
+    "output_dir": "",
+    "pitch_percent": 2.0,
+    "preset_label": next(iter(OUTPUT_PRESETS)),  # "keep"
+}
+
+# Correspondance champ de config -> clé du widget Streamlit associé.
+# On garde le dict `cfg` (persistant) séparé des widgets, car Streamlit purge
+# la clé d'un widget qui n'est pas affiché (ex : input_dir en mode "files").
+WIDGET_KEYS = {
+    "mode": "w_mode",
+    "input_dir": "w_input_dir",
+    "output_dir": "w_output_dir",
+    "pitch_percent": "w_pitch",
+    "preset_label": "w_preset",
+}
+
+
+# ---------------------------------------------------------------------------
+# Traductions
+# ---------------------------------------------------------------------------
+def load_locale(lang: str) -> dict:
+    try:
+        return json.loads((HERE / f"{lang}.json").read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def get_translations(lang: str) -> dict:
+    """Charge la langue demandée, avec l'anglais en repli pour les clés manquantes."""
+    base = load_locale(DEFAULT_LANG)
+    if lang != DEFAULT_LANG:
+        override = load_locale(lang)
+        for k, v in override.items():
+            if isinstance(v, dict) and isinstance(base.get(k), dict):
+                base[k] = {**base[k], **v}  # fusion profonde (ex : "presets")
+            else:
+                base[k] = v
+    return base
+
+
+# ---------------------------------------------------------------------------
+# Helpers FFmpeg
+# ---------------------------------------------------------------------------
+def ffmpeg_available() -> bool:
+    return shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
+
+
+def get_sample_rate(filepath: Path) -> int:
+    """Récupère le sample rate du fichier via ffprobe (44100 par défaut)."""
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "a:0",
+                "-show_entries", "stream=sample_rate",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(filepath),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        return int(result.stdout.strip())
+    except (ValueError, subprocess.SubprocessError):
+        return 44100
+
+
+def pitch_file(input_path: Path, output_path: Path, rate: float, codec_args):
+    """Pitche un fichier (vitesse + hauteur) et l'encode selon codec_args."""
+    sample_rate = get_sample_rate(input_path)
+    new_rate = int(sample_rate * rate)
+
+    # asetrate  -> on rejoue le fichier à un sample rate différent (vitesse + hauteur)
+    # aresample -> on revient au sample rate standard pour la compatibilité des lecteurs
+    filter_chain = f"asetrate={new_rate},aresample={sample_rate}"
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(input_path),
+        "-filter:a", filter_chain,
+        "-vn",
+        *codec_args,
+        str(output_path),
+    ]
+
+    proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    if proc.returncode != 0:
+        last = proc.stderr.strip().splitlines()[-1] if proc.stderr else "ffmpeg error"
+        raise RuntimeError(last)
+
+
+def resolve_codec(preset_id: str, source_suffix: str):
+    """Retourne (extension_sortie, arguments_codec) pour un fichier donné."""
+    out_ext, codec_args = OUTPUT_PRESETS.get(preset_id, (None, None))
+    if out_ext is None:  # garder le format d'origine
+        ext = source_suffix.lower()
+        return ext, KEEP_FORMAT_CODECS.get(ext, ["-codec:a", "copy"])
+    return out_ext, codec_args
+
+
+# ---------------------------------------------------------------------------
+# Sélecteur de dossier natif (fenêtre de l'OS) — fonctionne en local
+# ---------------------------------------------------------------------------
+def pick_folder() -> str:
+    """Ouvre une boîte de dialogue native pour choisir un dossier."""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        folder = filedialog.askdirectory()
+        root.destroy()
+        return folder or ""
+    except Exception:
+        return ""  # pas d'environnement graphique (ex : serveur distant)
+
+
+# ---------------------------------------------------------------------------
+# Persistance : profils (base JSON) + brouillon (état non enregistré)
+# ---------------------------------------------------------------------------
+def load_profiles() -> dict:
+    try:
+        return json.loads(PROFILES_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def save_profiles(profiles: dict):
+    PROFILES_PATH.write_text(
+        json.dumps(profiles, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def load_draft():
+    try:
+        return json.loads(DRAFT_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
+def save_draft(profile, config, dirty):
+    try:
+        DRAFT_PATH.write_text(
+            json.dumps(
+                {
+                    "profile": profile,
+                    "config": config,
+                    "dirty": dirty,
+                    "lang": st.session_state.get("lang", DEFAULT_LANG),
+                },
+                indent=2, ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+def current_config() -> dict:
+    """Config courante (copie du dict persistant `cfg`)."""
+    return dict(st.session_state["cfg"])
+
+
+# ---------------------------------------------------------------------------
+# Synchronisation widgets <-> cfg
+# ---------------------------------------------------------------------------
+def sync(field: str, wkey: str):
+    """Callback on_change : recopie la valeur d'un widget dans le dict `cfg`."""
+    st.session_state["cfg"][field] = st.session_state[wkey]
+
+
+def ensure_widget(wkey: str, value):
+    """Restaure la valeur d'un widget purgé par Streamlit (rendu conditionnel)."""
+    if wkey not in st.session_state:
+        st.session_state[wkey] = value
+
+
+# ---------------------------------------------------------------------------
+# Initialisation (1re exécution de la session) : restaure le brouillon
+# ---------------------------------------------------------------------------
+if "init_done" not in st.session_state:
+    profiles = load_profiles()
+    draft = load_draft()
+
+    lang = DEFAULT_LANG
+    if draft and isinstance(draft.get("config"), dict):
+        cfg = {**DEFAULTS, **draft["config"]}
+        active = draft.get("profile")
+        if active not in profiles:
+            active = None
+        if draft.get("lang") in LANGUAGES:
+            lang = draft["lang"]
+        snapshot = {**DEFAULTS, **profiles[active]} if active else dict(DEFAULTS)
+    else:
+        cfg = dict(DEFAULTS)
+        active = None
+        snapshot = dict(DEFAULTS)
+
+    st.session_state["cfg"] = dict(cfg)
+    st.session_state["saved_snapshot"] = snapshot
+    for field, wkey in WIDGET_KEYS.items():
+        st.session_state[wkey] = cfg[field]
+    st.session_state["lang"] = lang
+    st.session_state["active_profile"] = active
+    st.session_state["profile_name"] = active or ""
+    st.session_state["profile_select"] = ""
+    st.session_state["init_done"] = True
+
+
+# ---------------------------------------------------------------------------
+# Callbacks profils (muter le session_state est autorisé dans un callback,
+# y compris pour des clés de widgets déjà instanciés)
+# ---------------------------------------------------------------------------
+def cb_load():
+    profiles = load_profiles()
+    sel = st.session_state.get("profile_select", "")
+    if sel not in profiles:
+        return
+    cfg = {**DEFAULTS, **profiles[sel]}
+    st.session_state["cfg"] = dict(cfg)
+    for field, wkey in WIDGET_KEYS.items():
+        st.session_state[wkey] = cfg[field]
+    st.session_state["active_profile"] = sel
+    st.session_state["profile_name"] = sel
+    st.session_state["saved_snapshot"] = dict(cfg)
+
+
+def cb_save():
+    name = st.session_state.get("profile_name", "").strip()
+    if not name:
+        return
+    cfg = current_config()
+    profiles = load_profiles()
+    profiles[name] = cfg
+    save_profiles(profiles)
+    st.session_state["active_profile"] = name
+    st.session_state["saved_snapshot"] = dict(cfg)
+    st.session_state["_just_saved"] = name
+
+
+def cb_delete():
+    name = st.session_state.get("profile_name", "").strip()
+    profiles = load_profiles()
+    if name in profiles:
+        profiles.pop(name)
+        save_profiles(profiles)
+    st.session_state["active_profile"] = None
+    st.session_state["profile_name"] = ""
+    st.session_state["profile_select"] = ""
+    st.session_state["saved_snapshot"] = dict(DEFAULTS)
+
+
+# Traductions de la langue courante
+T = get_translations(st.session_state["lang"])
+PRESETS_T = T.get("presets", {})
+
+
+# ---------------------------------------------------------------------------
+# Page
+# ---------------------------------------------------------------------------
+st.set_page_config(page_title="Auto Pitch Export", page_icon="🎚️", layout="centered")
+
+# CSS pour la disquette clignotante
+st.markdown(
+    """
+    <style>
+    @keyframes blink { 0%,100% {opacity:1;} 50% {opacity:0.12;} }
+    .floppy-dirty { animation: blink 1s ease-in-out infinite;
+                    color:#e63946; font-weight:700; font-size:1.05rem; }
+    .floppy-saved { color:#2a9d8f; font-weight:700; font-size:1.05rem; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.title(T["title"])
+st.caption(T["caption"])
+
+if not ffmpeg_available():
+    st.error(T["ffmpeg_missing"])
+
+# État "modifié / enregistré" (cfg est toujours présent, jamais purgé)
+dirty = st.session_state["cfg"] != st.session_state["saved_snapshot"]
+
+# Avertissement "Pensez à sauvegarder" — visible aussi après un rafraîchissement
+if dirty:
+    active = st.session_state.get("active_profile")
+    if active:
+        st.warning(T["save_reminder_active"].format(name=active))
+    else:
+        st.warning(T["save_reminder_none"])
+
+
+# ---------------------------------------------------------------------------
+# Barre latérale : langue + gestion des profils
+# ---------------------------------------------------------------------------
+with st.sidebar:
+    st.selectbox(
+        T["language_label"], LANGUAGES, key="lang",
+        format_func=lambda code: get_translations(code).get("language_name", code),
+    )
+
+    st.header(T["sidebar_profiles"])
+
+    if dirty:
+        st.markdown(f"<div class='floppy-dirty'>{T['floppy_unsaved']}</div>",
+                    unsafe_allow_html=True)
+    else:
+        st.markdown(f"<div class='floppy-saved'>{T['floppy_saved']}</div>",
+                    unsafe_allow_html=True)
+
+    active = st.session_state.get("active_profile")
+    st.caption(T["active_profile"].format(name=active) if active else T["no_active_profile"])
+
+    profiles = load_profiles()
+    names = list(profiles.keys())
+
+    st.divider()
+    # Valeur "" = placeholder (stable, indépendante de la langue)
+    st.selectbox(
+        T["load_profile"], [""] + names, key="profile_select",
+        format_func=lambda n: T["select_placeholder"] if n == "" else n,
+    )
+    st.button(T["load_btn"], use_container_width=True, on_click=cb_load,
+              disabled=(st.session_state.get("profile_select", "") == ""))
+
+    st.divider()
+    st.text_input(T["profile_name"], key="profile_name", placeholder=T["profile_name_ph"])
+    name = st.session_state.get("profile_name", "").strip()
+
+    b1, b2 = st.columns(2)
+    b1.button(T["save_btn"], type="primary", use_container_width=True,
+              on_click=cb_save, disabled=not name)
+    b2.button(T["delete_btn"], use_container_width=True,
+              on_click=cb_delete, disabled=name not in profiles)
+
+    saved_name = st.session_state.pop("_just_saved", None)
+    if saved_name:
+        st.toast(T["saved_toast"].format(name=saved_name))
+
+
+# ---------------------------------------------------------------------------
+# Zone principale : configuration
+# ---------------------------------------------------------------------------
+st.radio(
+    T["what_to_pitch"], ["folder", "files"], key="w_mode", horizontal=True,
+    format_func=lambda m: T["mode_folder"] if m == "folder" else T["mode_files"],
+    on_change=sync, args=("mode", "w_mode"),
+)
+mode = st.session_state["w_mode"]
+
+uploaded_files = None
+
+# --- Entrée ---
+if mode == "folder":
+    c1, c2 = st.columns([5, 1], vertical_alignment="bottom")
+    with c2:
+        if st.button(T["browse"], key="browse_in", use_container_width=True):
+            chosen = pick_folder()
+            if chosen:
+                st.session_state["cfg"]["input_dir"] = chosen
+                st.session_state["w_input_dir"] = chosen
+    ensure_widget("w_input_dir", st.session_state["cfg"]["input_dir"])
+    c1.text_input(T["input_folder"], key="w_input_dir", placeholder=T["input_folder_ph"],
+                  on_change=sync, args=("input_dir", "w_input_dir"))
+else:
+    st.caption(T["files_not_saved_note"])
+    uploaded_files = st.file_uploader(
+        T["files_uploader"],
+        type=[e.lstrip(".") for e in AUDIO_EXTENSIONS],
+        accept_multiple_files=True,
+    )
+
+# --- Sortie ---
+o1, o2 = st.columns([5, 1], vertical_alignment="bottom")
+with o2:
+    if st.button(T["browse"], key="browse_out", use_container_width=True):
+        chosen = pick_folder()
+        if chosen:
+            st.session_state["cfg"]["output_dir"] = chosen
+            st.session_state["w_output_dir"] = chosen
+ensure_widget("w_output_dir", st.session_state["cfg"]["output_dir"])
+o1.text_input(T["output_folder"], key="w_output_dir", placeholder=T["output_folder_ph"],
+              on_change=sync, args=("output_dir", "w_output_dir"))
+
+# --- Réglages ---
+r1, r2 = st.columns(2)
+ensure_widget("w_pitch", st.session_state["cfg"]["pitch_percent"])
+r1.slider(T["pitch_slider"], min_value=-12.0, max_value=12.0, step=0.1, key="w_pitch",
+          on_change=sync, args=("pitch_percent", "w_pitch"))
+ensure_widget("w_preset", st.session_state["cfg"]["preset_label"])
+r2.selectbox(T["format_select"], list(OUTPUT_PRESETS), key="w_preset",
+             format_func=lambda pid: PRESETS_T.get(pid, pid),
+             on_change=sync, args=("preset_label", "w_preset"))
+
+cfg = st.session_state["cfg"]
+input_dir = cfg["input_dir"]
+output_dir = cfg["output_dir"]
+pitch_percent = cfg["pitch_percent"]
+preset_id = cfg["preset_label"]
+
+st.divider()
+run = st.button(T["run_btn"], type="primary", use_container_width=True)
+
+# Persiste le brouillon (= état courant + flag non enregistré) à chaque exécution.
+# Permet de retrouver "Pensez à sauvegarder" même après un rafraîchissement du navigateur.
+save_draft(st.session_state.get("active_profile"), current_config(), dirty)
+
+
+# ---------------------------------------------------------------------------
+# Traitement
+# ---------------------------------------------------------------------------
+def collect_folder_files(folder: str):
+    return sorted(
+        f for f in Path(folder).iterdir()
+        if f.is_file() and f.suffix.lower() in AUDIO_EXTENSIONS
+    )
+
+
+if run:
+    if not ffmpeg_available():
+        st.error(T["ffmpeg_missing_short"])
+        st.stop()
+
+    rate = 1.0 + (pitch_percent / 100.0)
+    tmp_dir = None
+
+    # ---- Liste des fichiers ----
+    if mode == "folder":
+        if not input_dir or not Path(input_dir).is_dir():
+            st.error(T["invalid_input"])
+            st.stop()
+        files = collect_folder_files(input_dir)
+    else:
+        if not uploaded_files:
+            st.error(T["no_files_selected"])
+            st.stop()
+        tmp_dir = Path(tempfile.mkdtemp(prefix="pitch_in_"))
+        files = []
+        for uf in uploaded_files:
+            p = tmp_dir / uf.name
+            p.write_bytes(uf.getbuffer())
+            files.append(p)
+
+    if not files:
+        st.error(T["no_audio_found"])
+        st.stop()
+
+    # ---- Dossier de sortie ----
+    if output_dir and output_dir.strip():
+        out_dir = Path(output_dir.strip())
+    elif mode == "folder":
+        out_dir = Path(input_dir) / "pitched"
+    else:
+        out_dir = Path.cwd() / "pitched"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    st.info(T["run_info"].format(
+        pct=f"{pitch_percent:+.2f}", rate=f"{rate:.4f}",
+        preset=PRESETS_T.get(preset_id, preset_id), out=out_dir,
+    ))
+
+    progress = st.progress(0.0, text=T["starting"])
+    log_area = st.empty()
+    logs = []
+    ok = errors = 0
+
+    for i, f in enumerate(files, 1):
+        progress.progress((i - 1) / len(files), text=T["processing"].format(name=f.name))
+        out_ext, codec_args = resolve_codec(preset_id, f.suffix)
+        out_path = out_dir / (f.stem + out_ext)
+
+        # Évite d'écraser la source si même dossier + même nom/format
+        if out_path.resolve() == f.resolve():
+            out_path = out_dir / (f.stem + "_pitched" + out_ext)
+
+        try:
+            pitch_file(f, out_path, rate, codec_args)
+            ok += 1
+            logs.append(f"[{i}/{len(files)}] ✅ {f.name} → {out_path.name}")
+        except Exception as e:
+            errors += 1
+            logs.append(f"[{i}/{len(files)}] ❌ {f.name} : {e}")
+        log_area.code("\n".join(logs), language=None)
+
+    progress.progress(1.0, text=T["done_progress"])
+
+    if tmp_dir:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    if errors == 0:
+        st.success(T["success"].format(ok=ok, out=out_dir))
+    else:
+        st.warning(T["partial"].format(ok=ok, errors=errors, out=out_dir))
+    st.balloons()
