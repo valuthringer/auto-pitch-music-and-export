@@ -1,2 +1,4 @@
 profiles.json
 .pitch_draft.json
+__pycache__/
+*.pyc
