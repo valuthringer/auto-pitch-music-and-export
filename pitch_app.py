@@ -292,7 +292,6 @@ if "init_done" not in st.session_state:
         st.session_state[wkey] = cfg[field]
     st.session_state["lang"] = lang
     st.session_state["active_profile"] = active
-    st.session_state["profile_name"] = active or ""
     st.session_state["profile_select"] = active or ""
     st.session_state["init_done"] = True
 
@@ -311,12 +310,38 @@ def cb_load():
     for field, wkey in WIDGET_KEYS.items():
         st.session_state[wkey] = cfg[field]
     st.session_state["active_profile"] = sel
-    st.session_state["profile_name"] = sel
     st.session_state["saved_snapshot"] = dict(cfg)
 
 
 def cb_save():
-    name = st.session_state.get("profile_name", "").strip()
+    # Overwrite the currently selected profile with the current config.
+    sel = st.session_state.get("profile_select", "").strip()
+    if not sel:
+        return
+    cfg = current_config()
+    profiles = load_profiles()
+    profiles[sel] = cfg
+    save_profiles(profiles)
+    st.session_state["active_profile"] = sel
+    st.session_state["saved_snapshot"] = dict(cfg)
+    st.session_state["_just_saved"] = sel
+
+
+def cb_delete():
+    # Delete the currently selected profile.
+    sel = st.session_state.get("profile_select", "").strip()
+    profiles = load_profiles()
+    if sel in profiles:
+        profiles.pop(sel)
+        save_profiles(profiles)
+    st.session_state["active_profile"] = None
+    st.session_state["profile_select"] = ""
+    st.session_state["saved_snapshot"] = dict(DEFAULTS)
+
+
+def cb_create():
+    # Create a new profile from the dedicated name input + current config.
+    name = st.session_state.get("new_profile_name", "").strip()
     if not name:
         return
     cfg = current_config()
@@ -325,20 +350,20 @@ def cb_save():
     save_profiles(profiles)
     st.session_state["active_profile"] = name
     st.session_state["saved_snapshot"] = dict(cfg)
-    st.session_state["profile_select"] = name  # keep the dropdown in sync
+    st.session_state["profile_select"] = name  # select the new profile
     st.session_state["_just_saved"] = name
+    st.session_state["new_profile_name"] = ""
+    st.session_state["show_create"] = False  # collapse the form after creating
 
 
-def cb_delete():
-    name = st.session_state.get("profile_name", "").strip()
-    profiles = load_profiles()
-    if name in profiles:
-        profiles.pop(name)
-        save_profiles(profiles)
-    st.session_state["active_profile"] = None
-    st.session_state["profile_name"] = ""
-    st.session_state["profile_select"] = ""
-    st.session_state["saved_snapshot"] = dict(DEFAULTS)
+def cb_open_create():
+    # Reveal the "create a profile" form (name input + confirm).
+    st.session_state["show_create"] = True
+
+
+def cb_close_create():
+    # Hide the create form again.
+    st.session_state["show_create"] = False
 
 
 # Translations for the current language
@@ -414,15 +439,27 @@ with st.sidebar:
         on_change=cb_load,
     )
 
-    # Save / delete happen right here, in the same place as the selection.
-    st.text_input(T["profile_name"], key="profile_name", placeholder=T["profile_name_ph"])
-    name = st.session_state.get("profile_name", "").strip()
-
+    # Save / delete always act on the currently selected profile.
+    sel = st.session_state.get("profile_select", "").strip()
     b1, b2 = st.columns(2)
     b1.button(T["save_btn"], type="primary", use_container_width=True,
-              on_click=cb_save, disabled=not name)
+              on_click=cb_save, disabled=not sel)
     b2.button(T["delete_btn"], use_container_width=True,
-              on_click=cb_delete, disabled=name not in profiles)
+              on_click=cb_delete, disabled=sel not in profiles)
+
+    # Separate "create a profile" flow: the name input only shows on demand.
+    if st.session_state.get("show_create"):
+        st.text_input(T["profile_name"], key="new_profile_name",
+                      placeholder=T["profile_name_ph"])
+        new_name = st.session_state.get("new_profile_name", "").strip()
+        c1, c2 = st.columns(2)
+        c1.button(T["create_confirm_btn"], type="primary", use_container_width=True,
+                  on_click=cb_create, disabled=not new_name)
+        c2.button(T["cancel_btn"], use_container_width=True,
+                  on_click=cb_close_create)
+    else:
+        st.button(T["create_btn"], use_container_width=True,
+                  on_click=cb_open_create)
 
     saved_name = st.session_state.pop("_just_saved", None)
     if saved_name:
