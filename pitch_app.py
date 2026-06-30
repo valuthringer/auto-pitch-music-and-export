@@ -293,7 +293,7 @@ if "init_done" not in st.session_state:
     st.session_state["lang"] = lang
     st.session_state["active_profile"] = active
     st.session_state["profile_name"] = active or ""
-    st.session_state["profile_select"] = ""
+    st.session_state["profile_select"] = active or ""
     st.session_state["init_done"] = True
 
 
@@ -325,6 +325,7 @@ def cb_save():
     save_profiles(profiles)
     st.session_state["active_profile"] = name
     st.session_state["saved_snapshot"] = dict(cfg)
+    st.session_state["profile_select"] = name  # keep the dropdown in sync
     st.session_state["_just_saved"] = name
 
 
@@ -350,7 +351,7 @@ PRESETS_T = T.get("presets", {})
 # ---------------------------------------------------------------------------
 st.set_page_config(page_title="Auto Pitch Export", page_icon="🎚️", layout="centered")
 
-# CSS for the blinking floppy-disk indicator
+# CSS: blinking floppy-disk indicator + hand cursor on dropdowns/radios
 st.markdown(
     """
     <style>
@@ -358,6 +359,9 @@ st.markdown(
     .floppy-dirty { animation: blink 1s ease-in-out infinite;
                     color:#e63946; font-weight:700; font-size:1.05rem; }
     .floppy-saved { color:#2a9d8f; font-weight:700; font-size:1.05rem; }
+    /* Show a pointer (hand) instead of a text caret on select widgets */
+    div[data-baseweb="select"], div[data-baseweb="select"] * { cursor: pointer !important; }
+    label[data-baseweb="radio"], label[data-baseweb="radio"] * { cursor: pointer !important; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -399,22 +403,18 @@ with st.sidebar:
         st.markdown(f"<div class='floppy-saved'>{T['floppy_saved']}</div>",
                     unsafe_allow_html=True)
 
-    active = st.session_state.get("active_profile")
-    st.caption(T["active_profile"].format(name=active) if active else T["no_active_profile"])
-
     profiles = load_profiles()
     names = list(profiles.keys())
 
-    st.divider()
-    # Value "" = placeholder (stable, language-independent)
+    # Select a profile -> loads it immediately (no separate "Load" button).
+    # Value "" = placeholder (stable, language-independent).
     st.selectbox(
         T["load_profile"], [""] + names, key="profile_select",
         format_func=lambda n: T["select_placeholder"] if n == "" else n,
+        on_change=cb_load,
     )
-    st.button(T["load_btn"], use_container_width=True, on_click=cb_load,
-              disabled=(st.session_state.get("profile_select", "") == ""))
 
-    st.divider()
+    # Save / delete happen right here, in the same place as the selection.
     st.text_input(T["profile_name"], key="profile_name", placeholder=T["profile_name_ph"])
     name = st.session_state.get("profile_name", "").strip()
 
