@@ -2,18 +2,18 @@
 """
 pitch_batch.py
 
-Pitche (vitesse + hauteur, comme "Change Speed" dans Audacity) tous les
-fichiers audio d'un dossier d'entrée et les exporte dans un dossier de sortie.
+Pitches (speed + pitch, like "Change Speed" in Audacity) every audio file in an
+input folder and exports them to an output folder.
 
-Nécessite ffmpeg installé et accessible dans le PATH.
-  -> Windows : https://ffmpeg.org/download.html (ou "winget install ffmpeg")
+Requires ffmpeg installed and available in PATH.
+  -> Windows : https://ffmpeg.org/download.html (or "winget install ffmpeg")
   -> Mac     : brew install ffmpeg
   -> Linux   : sudo apt install ffmpeg
 
-Usage :
-    python pitch_batch.py "C:/chemin/dossier_entree" "C:/chemin/dossier_sortie" --rate 1.02
+Usage:
+    python pitch_batch.py "C:/path/input_folder" "C:/path/output_folder" --rate 1.02
 
-Par défaut --rate vaut 1.02 (soit +2%).
+By default --rate is 1.02 (i.e. +2%).
 """
 
 import argparse
@@ -21,7 +21,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-# Extensions audio prises en charge
+# Supported audio extensions
 AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".aiff", ".aif", ".m4a", ".ogg", ".wma"}
 
 def check_ffmpeg():
@@ -38,7 +38,7 @@ def check_ffmpeg():
         sys.exit(1)
 
 def get_sample_rate(filepath: Path) -> int:
-    """Récupère le sample rate du fichier via ffprobe."""
+    """Get the file's sample rate via ffprobe."""
     result = subprocess.run(
         [
             "ffprobe", "-v", "error",
@@ -54,14 +54,14 @@ def get_sample_rate(filepath: Path) -> int:
     try:
         return int(result.stdout.strip())
     except ValueError:
-        return 44100  # valeur par défaut si la détection échoue
+        return 44100  # default value if detection fails
 
 def pitch_file(input_path: Path, output_path: Path, rate: float, out_ext: str):
     sample_rate = get_sample_rate(input_path)
     new_rate = int(sample_rate * rate)
 
-    # asetrate = on rejoue le fichier à un sample rate différent (change vitesse + hauteur)
-    # aresample = on revient au sample rate standard pour la compatibilité des lecteurs
+    # asetrate = replay the file at a different sample rate (changes speed + pitch)
+    # aresample = go back to the standard sample rate for player compatibility
     filter_chain = f"asetrate={new_rate},aresample={sample_rate}"
 
     cmd = [
@@ -71,9 +71,9 @@ def pitch_file(input_path: Path, output_path: Path, rate: float, out_ext: str):
         "-vn",
     ]
 
-    # Réglages qualité selon le format de sortie
+    # Quality settings depending on the output format
     if out_ext == ".mp3":
-        cmd += ["-codec:a", "libmp3lame", "-q:a", "0"]  # qualité max VBR
+        cmd += ["-codec:a", "libmp3lame", "-q:a", "0"]  # max VBR quality
     elif out_ext == ".flac":
         cmd += ["-codec:a", "flac"]
     elif out_ext == ".wav":

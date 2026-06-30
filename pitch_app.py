@@ -2,23 +2,23 @@
 """
 pitch_app.py
 
-Interface graphique (navigateur, via Streamlit) pour pitcher des musiques en
-masse avec FFmpeg — vitesse + hauteur, comme "Change Speed" dans Audacity.
+Browser GUI (via Streamlit) to batch-pitch music files with FFmpeg —
+speed + pitch, like "Change Speed" in Audacity.
 
-On peut :
-  - pitcher tout un dossier
-  - OU pitcher seulement des fichiers choisis
-  - choisir un dossier de sortie
-  - convertir vers un autre format / une autre qualité (MP3 320, WAV, FLAC...)
-  - créer / sauvegarder / charger des PROFILS de configuration (base JSON)
-  - changer la langue de l'interface (en.json par défaut, fr.json)
+You can:
+  - pitch a whole folder
+  - OR pitch only selected files
+  - choose an output folder
+  - convert to another format / quality (MP3 320, WAV, FLAC...)
+  - create / save / load configuration PROFILES (JSON database)
+  - switch the interface language (en.json by default, fr.json)
 
-Lancement :
+Run:
     pip install streamlit
     streamlit run pitch_app.py
 
-Nécessite ffmpeg ET ffprobe installés et accessibles dans le PATH.
-  -> Windows : winget install ffmpeg   (ou https://ffmpeg.org/download.html)
+Requires ffmpeg AND ffprobe installed and available in PATH.
+  -> Windows : winget install ffmpeg   (or https://ffmpeg.org/download.html)
   -> Mac     : brew install ffmpeg
   -> Linux   : sudo apt install ffmpeg
 """
@@ -33,22 +33,22 @@ import streamlit as st
 
 HERE = Path(__file__).parent
 
-# Extensions audio prises en charge en entrée
+# Audio extensions accepted as input
 AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".aiff", ".aif", ".m4a", ".ogg", ".wma", ".opus"}
 
-# Fichiers de persistance
+# Persistence files
 PROFILES_PATH = HERE / "profiles.json"
 DRAFT_PATH = HERE / ".pitch_draft.json"
 
-# Langues disponibles (code -> fichier <code>.json). "en" = défaut/fallback.
+# Available languages (code -> <code>.json file). "en" = default/fallback.
 LANGUAGES = ["en", "fr"]
 DEFAULT_LANG = "en"
 
 # ---------------------------------------------------------------------------
-# Presets de format / qualité de sortie, identifiés par un ID STABLE
-# (indépendant de la langue). id -> (extension de sortie, args codec FFmpeg).
-# Le libellé affiché vient des fichiers de traduction ("presets").
-# "keep" = garder le format d'origine (ext = None).
+# Output format / quality presets, identified by a STABLE id
+# (language-independent). id -> (output extension, FFmpeg codec args).
+# The displayed label comes from the translation files ("presets").
+# "keep" = keep the original format (ext = None).
 # ---------------------------------------------------------------------------
 OUTPUT_PRESETS = {
     "keep":     (None, None),
@@ -67,7 +67,7 @@ OUTPUT_PRESETS = {
     "opus_128": (".opus", ["-codec:a", "libopus", "-b:a", "128k"]),
 }
 
-# Réglages "qualité max" utilisés quand on garde le format d'origine
+# "Max quality" settings used when keeping the original format
 KEEP_FORMAT_CODECS = {
     ".mp3":  ["-codec:a", "libmp3lame", "-q:a", "0"],
     ".flac": ["-codec:a", "flac", "-compression_level", "8"],
@@ -80,8 +80,8 @@ KEEP_FORMAT_CODECS = {
     ".wma":  ["-codec:a", "wmav2", "-b:a", "192k"],
 }
 
-# Config sauvegardée dans un profil (valeurs internes, indépendantes de la langue).
-# Les fichiers individuels ne sont volontairement PAS conservés.
+# Config stored in a profile (internal, language-independent values).
+# Individual files are deliberately NOT stored.
 DEFAULTS = {
     "mode": "folder",            # "folder" | "files"
     "input_dir": "",
@@ -90,9 +90,10 @@ DEFAULTS = {
     "preset_label": next(iter(OUTPUT_PRESETS)),  # "keep"
 }
 
-# Correspondance champ de config -> clé du widget Streamlit associé.
-# On garde le dict `cfg` (persistant) séparé des widgets, car Streamlit purge
-# la clé d'un widget qui n'est pas affiché (ex : input_dir en mode "files").
+# Maps a config field -> its associated Streamlit widget key.
+# We keep the (persistent) `cfg` dict separate from the widgets, because
+# Streamlit drops the key of a widget that is not rendered (e.g. input_dir
+# in "files" mode).
 WIDGET_KEYS = {
     "mode": "w_mode",
     "input_dir": "w_input_dir",
@@ -103,7 +104,7 @@ WIDGET_KEYS = {
 
 
 # ---------------------------------------------------------------------------
-# Traductions
+# Translations
 # ---------------------------------------------------------------------------
 def load_locale(lang: str) -> dict:
     try:
@@ -113,27 +114,27 @@ def load_locale(lang: str) -> dict:
 
 
 def get_translations(lang: str) -> dict:
-    """Charge la langue demandée, avec l'anglais en repli pour les clés manquantes."""
+    """Load the requested language, falling back to English for missing keys."""
     base = load_locale(DEFAULT_LANG)
     if lang != DEFAULT_LANG:
         override = load_locale(lang)
         for k, v in override.items():
             if isinstance(v, dict) and isinstance(base.get(k), dict):
-                base[k] = {**base[k], **v}  # fusion profonde (ex : "presets")
+                base[k] = {**base[k], **v}  # deep merge (e.g. "presets")
             else:
                 base[k] = v
     return base
 
 
 # ---------------------------------------------------------------------------
-# Helpers FFmpeg
+# FFmpeg helpers
 # ---------------------------------------------------------------------------
 def ffmpeg_available() -> bool:
     return shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
 
 
 def get_sample_rate(filepath: Path) -> int:
-    """Récupère le sample rate du fichier via ffprobe (44100 par défaut)."""
+    """Get the file's sample rate via ffprobe (44100 by default)."""
     try:
         result = subprocess.run(
             [
@@ -153,12 +154,12 @@ def get_sample_rate(filepath: Path) -> int:
 
 
 def pitch_file(input_path: Path, output_path: Path, rate: float, codec_args):
-    """Pitche un fichier (vitesse + hauteur) et l'encode selon codec_args."""
+    """Pitch a file (speed + pitch) and encode it according to codec_args."""
     sample_rate = get_sample_rate(input_path)
     new_rate = int(sample_rate * rate)
 
-    # asetrate  -> on rejoue le fichier à un sample rate différent (vitesse + hauteur)
-    # aresample -> on revient au sample rate standard pour la compatibilité des lecteurs
+    # asetrate  -> replay the file at a different sample rate (changes speed + pitch)
+    # aresample -> go back to the standard sample rate for player compatibility
     filter_chain = f"asetrate={new_rate},aresample={sample_rate}"
 
     cmd = [
@@ -177,19 +178,19 @@ def pitch_file(input_path: Path, output_path: Path, rate: float, codec_args):
 
 
 def resolve_codec(preset_id: str, source_suffix: str):
-    """Retourne (extension_sortie, arguments_codec) pour un fichier donné."""
+    """Return (output_extension, codec_args) for a given file."""
     out_ext, codec_args = OUTPUT_PRESETS.get(preset_id, (None, None))
-    if out_ext is None:  # garder le format d'origine
+    if out_ext is None:  # keep the original format
         ext = source_suffix.lower()
         return ext, KEEP_FORMAT_CODECS.get(ext, ["-codec:a", "copy"])
     return out_ext, codec_args
 
 
 # ---------------------------------------------------------------------------
-# Sélecteur de dossier natif (fenêtre de l'OS) — fonctionne en local
+# Native folder picker (OS dialog) — works locally
 # ---------------------------------------------------------------------------
 def pick_folder() -> str:
-    """Ouvre une boîte de dialogue native pour choisir un dossier."""
+    """Open a native dialog to choose a folder."""
     try:
         import tkinter as tk
         from tkinter import filedialog
@@ -201,11 +202,11 @@ def pick_folder() -> str:
         root.destroy()
         return folder or ""
     except Exception:
-        return ""  # pas d'environnement graphique (ex : serveur distant)
+        return ""  # no graphical environment (e.g. remote server)
 
 
 # ---------------------------------------------------------------------------
-# Persistance : profils (base JSON) + brouillon (état non enregistré)
+# Persistence: profiles (JSON database) + draft (unsaved state)
 # ---------------------------------------------------------------------------
 def load_profiles() -> dict:
     try:
@@ -246,26 +247,26 @@ def save_draft(profile, config, dirty):
 
 
 def current_config() -> dict:
-    """Config courante (copie du dict persistant `cfg`)."""
+    """Current config (copy of the persistent `cfg` dict)."""
     return dict(st.session_state["cfg"])
 
 
 # ---------------------------------------------------------------------------
-# Synchronisation widgets <-> cfg
+# Widget <-> cfg synchronization
 # ---------------------------------------------------------------------------
 def sync(field: str, wkey: str):
-    """Callback on_change : recopie la valeur d'un widget dans le dict `cfg`."""
+    """on_change callback: copy a widget's value into the `cfg` dict."""
     st.session_state["cfg"][field] = st.session_state[wkey]
 
 
 def ensure_widget(wkey: str, value):
-    """Restaure la valeur d'un widget purgé par Streamlit (rendu conditionnel)."""
+    """Restore the value of a widget purged by Streamlit (conditional rendering)."""
     if wkey not in st.session_state:
         st.session_state[wkey] = value
 
 
 # ---------------------------------------------------------------------------
-# Initialisation (1re exécution de la session) : restaure le brouillon
+# Initialization (first run of the session): restore the draft
 # ---------------------------------------------------------------------------
 if "init_done" not in st.session_state:
     profiles = load_profiles()
@@ -297,8 +298,8 @@ if "init_done" not in st.session_state:
 
 
 # ---------------------------------------------------------------------------
-# Callbacks profils (muter le session_state est autorisé dans un callback,
-# y compris pour des clés de widgets déjà instanciés)
+# Profile callbacks (mutating session_state is allowed inside a callback,
+# including for keys of widgets that are already instantiated)
 # ---------------------------------------------------------------------------
 def cb_load():
     profiles = load_profiles()
@@ -339,7 +340,7 @@ def cb_delete():
     st.session_state["saved_snapshot"] = dict(DEFAULTS)
 
 
-# Traductions de la langue courante
+# Translations for the current language
 T = get_translations(st.session_state["lang"])
 PRESETS_T = T.get("presets", {})
 
@@ -349,7 +350,7 @@ PRESETS_T = T.get("presets", {})
 # ---------------------------------------------------------------------------
 st.set_page_config(page_title="Auto Pitch Export", page_icon="🎚️", layout="centered")
 
-# CSS pour la disquette clignotante
+# CSS for the blinking floppy-disk indicator
 st.markdown(
     """
     <style>
@@ -368,10 +369,10 @@ st.caption(T["caption"])
 if not ffmpeg_available():
     st.error(T["ffmpeg_missing"])
 
-# État "modifié / enregistré" (cfg est toujours présent, jamais purgé)
+# "Modified / saved" state (cfg is always present, never purged)
 dirty = st.session_state["cfg"] != st.session_state["saved_snapshot"]
 
-# Avertissement "Pensez à sauvegarder" — visible aussi après un rafraîchissement
+# "Remember to save" warning — also visible after a page refresh
 if dirty:
     active = st.session_state.get("active_profile")
     if active:
@@ -381,7 +382,7 @@ if dirty:
 
 
 # ---------------------------------------------------------------------------
-# Barre latérale : langue + gestion des profils
+# Sidebar: language + profile management
 # ---------------------------------------------------------------------------
 with st.sidebar:
     st.selectbox(
@@ -405,7 +406,7 @@ with st.sidebar:
     names = list(profiles.keys())
 
     st.divider()
-    # Valeur "" = placeholder (stable, indépendante de la langue)
+    # Value "" = placeholder (stable, language-independent)
     st.selectbox(
         T["load_profile"], [""] + names, key="profile_select",
         format_func=lambda n: T["select_placeholder"] if n == "" else n,
@@ -429,7 +430,7 @@ with st.sidebar:
 
 
 # ---------------------------------------------------------------------------
-# Zone principale : configuration
+# Main area: configuration
 # ---------------------------------------------------------------------------
 st.radio(
     T["what_to_pitch"], ["folder", "files"], key="w_mode", horizontal=True,
@@ -440,7 +441,7 @@ mode = st.session_state["w_mode"]
 
 uploaded_files = None
 
-# --- Entrée ---
+# --- Input ---
 if mode == "folder":
     c1, c2 = st.columns([5, 1], vertical_alignment="bottom")
     with c2:
@@ -460,7 +461,7 @@ else:
         accept_multiple_files=True,
     )
 
-# --- Sortie ---
+# --- Output ---
 o1, o2 = st.columns([5, 1], vertical_alignment="bottom")
 with o2:
     if st.button(T["browse"], key="browse_out", use_container_width=True):
@@ -472,7 +473,7 @@ ensure_widget("w_output_dir", st.session_state["cfg"]["output_dir"])
 o1.text_input(T["output_folder"], key="w_output_dir", placeholder=T["output_folder_ph"],
               on_change=sync, args=("output_dir", "w_output_dir"))
 
-# --- Réglages ---
+# --- Settings ---
 r1, r2 = st.columns(2)
 ensure_widget("w_pitch", st.session_state["cfg"]["pitch_percent"])
 r1.slider(T["pitch_slider"], min_value=-12.0, max_value=12.0, step=0.1, key="w_pitch",
@@ -491,13 +492,13 @@ preset_id = cfg["preset_label"]
 st.divider()
 run = st.button(T["run_btn"], type="primary", use_container_width=True)
 
-# Persiste le brouillon (= état courant + flag non enregistré) à chaque exécution.
-# Permet de retrouver "Pensez à sauvegarder" même après un rafraîchissement du navigateur.
+# Persist the draft (= current state + unsaved flag) on every run.
+# Lets us restore "Remember to save" even after a browser refresh.
 save_draft(st.session_state.get("active_profile"), current_config(), dirty)
 
 
 # ---------------------------------------------------------------------------
-# Traitement
+# Processing
 # ---------------------------------------------------------------------------
 def collect_folder_files(folder: str):
     return sorted(
@@ -514,7 +515,7 @@ if run:
     rate = 1.0 + (pitch_percent / 100.0)
     tmp_dir = None
 
-    # ---- Liste des fichiers ----
+    # ---- Build the file list ----
     if mode == "folder":
         if not input_dir or not Path(input_dir).is_dir():
             st.error(T["invalid_input"])
@@ -535,7 +536,7 @@ if run:
         st.error(T["no_audio_found"])
         st.stop()
 
-    # ---- Dossier de sortie ----
+    # ---- Output folder ----
     if output_dir and output_dir.strip():
         out_dir = Path(output_dir.strip())
     elif mode == "folder":
@@ -559,7 +560,7 @@ if run:
         out_ext, codec_args = resolve_codec(preset_id, f.suffix)
         out_path = out_dir / (f.stem + out_ext)
 
-        # Évite d'écraser la source si même dossier + même nom/format
+        # Avoid overwriting the source if same folder + same name/format
         if out_path.resolve() == f.resolve():
             out_path = out_dir / (f.stem + "_pitched" + out_ext)
 
