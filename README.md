@@ -67,19 +67,6 @@ python auto_pitch_export.py "C:/path/input_folder" "C:/path/output_folder" --rat
 
 ---
 
-## 📁 Project structure
-
-| File                   | Role                                                |
-|------------------------|-----------------------------------------------------|
-| `pitch_app.py`         | Streamlit web app (full interface)                  |
-| `auto_pitch_export.py` | Command-line script (pitch a folder)                |
-| `start-app.bat`        | Windows launcher (checks Python + Streamlit)        |
-| `en.json` / `fr.json`  | Interface translation files                         |
-| `profiles.json`        | Saved profiles (generated, git-ignored)             |
-| `screen.png`           | Screenshot of the app                               |
-
----
-
 ## 🎵 Supported input audio formats
 
 `.wav` · `.mp3` · `.flac` · `.aiff` · `.aif` · `.m4a` · `.ogg` · `.wma` · `.opus`
